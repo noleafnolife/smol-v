@@ -1,7 +1,6 @@
 // smol-v - public domain - https://github.com/aras-p/smol-v
-// authored 2016-2018 by Aras Pranckevicius
+// authored on 2016 by Aras Pranckevicius
 // no warranty implied; use at your own risk
-// See end of file for license information.
 
 #include "smolv.h"
 #include <stdint.h>
@@ -1233,18 +1232,12 @@ static uint32_t smolv_DecodeLen(SpvOp op, uint32_t len)
 // 0x LLLL OOOO is how SPIR-V encodes it (L=length, O=op), we shuffle into:
 // 0x LLLO OOLO, so that common case (op<16, len<8) is encoded into one byte.
 
-static bool smolv_WriteLengthOp(smolv::ByteArray& arr, uint32_t len, SpvOp op)
+static void smolv_WriteLengthOp(smolv::ByteArray& arr, uint32_t len, SpvOp op)
 {
 	len = smolv_EncodeLen(op, len);
-    // SPIR-V length field is 16 bits; if we get a larger value that means something
-    // was wrong, e.g. a vector shuffle instruction with less than 4 words (and our
-    // adjustment to common lengths in smolv_EncodeLen wrapped around)
-    if (len > 0xFFFF)
-        return false;
 	op = smolv_RemapOp(op);
 	uint32_t oplen = ((len >> 4) << 20) | ((op >> 4) << 8) | ((len & 0xF) << 4) | (op & 0xF);
 	smolv_WriteVarint(arr, oplen);
-    return true;
 }
 
 static bool smolv_ReadLengthOp(const uint8_t*& data, const uint8_t* dataEnd, uint32_t& outLen, SpvOp& outOp)
@@ -1272,8 +1265,6 @@ static bool smolv_ReadLengthOp(const uint8_t*& data, const uint8_t* dataEnd, uin
 bool smolv::Encode(const void* spirvData, size_t spirvSize, ByteArray& outSmolv, uint32_t flags)
 {
 	const size_t wordCount = spirvSize / 4;
-    if (wordCount * 4 != spirvSize)
-        return false;
 	const uint32_t* words = (const uint32_t*)spirvData;
 	const uint32_t* wordsEnd = words + wordCount;
 	if (!smolv_CheckSpirVHeader(words, wordCount))
@@ -1326,23 +1317,18 @@ bool smolv::Encode(const void* spirvData, size_t spirvSize, ByteArray& outSmolv,
 		}
 
 		// length + opcode
-		if (!smolv_WriteLengthOp(outSmolv, instrLen, op))
-            return false;
+		smolv_WriteLengthOp(outSmolv, instrLen, op);
 
 		size_t ioffs = 1;
 		// write type as varint, if we have it
 		if (smolv_OpHasType(op))
 		{
-            if (ioffs >= instrLen)
-                return false;
 			smolv_WriteVarint(outSmolv, words[ioffs]);
 			ioffs++;
 		}
 		// write result as delta+zig+varint, if we have it
 		if (smolv_OpHasResult(op))
 		{
-            if (ioffs >= instrLen)
-                return false;
 			uint32_t v = words[ioffs];
 			smolv_WriteVarint(outSmolv, smolv_ZigEncode(v - prevResult)); // some deltas are negative, use zig
 			prevResult = v;
@@ -1352,8 +1338,6 @@ bool smolv::Encode(const void* spirvData, size_t spirvSize, ByteArray& outSmolv,
 		// Decorate & MemberDecorate: IDs relative to previous decorate
 		if (op == SpvOpDecorate || op == SpvOpMemberDecorate)
 		{
-            if (ioffs >= instrLen)
-                return false;
 			uint32_t v = words[ioffs];
 			smolv_WriteVarint(outSmolv, smolv_ZigEncode(v - prevDecorate)); // spirv-remapped deltas often negative, use zig
 			prevDecorate = v;
@@ -1395,7 +1379,7 @@ bool smolv::Encode(const void* spirvData, size_t spirvSize, ByteArray& outSmolv,
 				const int knownExtraOps = smolv_DecorationExtraOps(memberDec);
 				if (knownExtraOps == -1)
 					smolv_WriteVarint(outSmolv, memberLen-4);
-				else if (unsigned(knownExtraOps) + 4 != memberLen)
+				else if (knownExtraOps + 4 != memberLen)
 					return false; // invalid input
 
 				// Offset decorations are most often linearly increasing, so encode as deltas
@@ -1409,14 +1393,14 @@ bool smolv::Encode(const void* spirvData, size_t spirvSize, ByteArray& outSmolv,
 				else
 				{
 					// write rest of decorations as varint
-					for (uint32_t i = 4; i < memberLen; ++i)
+					for (int i = 4; i < memberLen; ++i)
 						smolv_WriteVarint(outSmolv, memberWords[i]);
 				}
 
 				memberWords += memberLen;
 				++count;
 			}
-			outSmolv[countLocation] = uint8_t(count);
+			outSmolv[countLocation] = count;
 			words = memberWords;
 			continue;
 		}
@@ -1425,8 +1409,6 @@ bool smolv::Encode(const void* spirvData, size_t spirvSize, ByteArray& outSmolv,
 		int relativeCount = smolv_OpDeltaFromResult(op);
 		for (int i = 0; i < relativeCount && ioffs < instrLen; ++i, ++ioffs)
 		{
-            if (ioffs >= instrLen)
-                return false;
 			uint32_t delta = prevResult - words[ioffs];
 			// some deltas are negative (often on branches, or if program was processed by spirv-remap),
 			// so use zig encoding
@@ -1436,7 +1418,7 @@ bool smolv::Encode(const void* spirvData, size_t spirvSize, ByteArray& outSmolv,
 		if (op == SpvOpVectorShuffleCompact)
 		{
 			// compact vector shuffle, just write out single swizzle byte
-			outSmolv.push_back(uint8_t(swizzle));
+			outSmolv.push_back(swizzle);
 			ioffs = instrLen;
 		}
 		else if (smolv_OpVarRest(op))
@@ -1593,7 +1575,7 @@ bool smolv::Decode(const void* smolvData, size_t smolvSize, void* spirvOutputBuf
 				}
 				else
 				{
-					for (uint32_t i = 4; i < memberLen; ++i)
+					for (int i = 4; i < memberLen; ++i)
 					{
 						if (!smolv_ReadVarint(bytes, bytesEnd, val)) return false;
 						smolv_Write4(outSpirv, val);
@@ -1686,8 +1668,6 @@ bool smolv::StatsCalculate(smolv::Stats* stats, const void* spirvData, size_t sp
 		return false;
 
 	const size_t wordCount = spirvSize / 4;
-    if (wordCount * 4 != spirvSize)
-        return false;
 	const uint32_t* words = (const uint32_t*)spirvData;
 	const uint32_t* wordsEnd = words + wordCount;
 	if (!smolv_CheckSpirVHeader(words, wordCount))
@@ -1798,7 +1778,7 @@ bool smolv::StatsCalculateSmol(smolv::Stats* stats, const void* smolvData, size_
 				}
 				else
 					memberLen = 4 + knownExtraOps;
-				for (uint32_t i = 4; i < memberLen; ++i)
+				for (int i = 4; i < memberLen; ++i)
 				{
 					if (!smolv_ReadVarint(bytes, bytesEnd, val)) return false;
 				}
@@ -1913,43 +1893,3 @@ void smolv::StatsPrint(const Stats* stats)
 	}	
 }
 
-
-// ------------------------------------------------------------------------------
-// This software is available under 2 licenses -- choose whichever you prefer.
-// ------------------------------------------------------------------------------
-// ALTERNATIVE A - MIT License
-// Copyright (c) 2016-2018 Aras Pranckevicius
-// Permission is hereby granted, free of charge, to any person obtaining a copy of
-// this software and associated documentation files (the "Software"), to deal in
-// the Software without restriction, including without limitation the rights to
-// use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
-// of the Software, and to permit persons to whom the Software is furnished to do
-// so, subject to the following conditions:
-// The above copyright notice and this permission notice shall be included in all
-// copies or substantial portions of the Software.
-// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-// SOFTWARE.
-// ------------------------------------------------------------------------------
-// ALTERNATIVE B - Public Domain (www.unlicense.org)
-// This is free and unencumbered software released into the public domain.
-// Anyone is free to copy, modify, publish, use, compile, sell, or distribute this
-// software, either in source code form or as a compiled binary, for any purpose,
-// commercial or non-commercial, and by any means.
-// In jurisdictions that recognize copyright laws, the author or authors of this
-// software dedicate any and all copyright interest in the software to the public
-// domain. We make this dedication for the benefit of the public at large and to
-// the detriment of our heirs and successors. We intend this dedication to be an
-// overt act of relinquishment in perpetuity of all present and future rights to
-// this software under copyright law.
-// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-// AUTHORS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
-// ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
-// WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
-// ------------------------------------------------------------------------------
